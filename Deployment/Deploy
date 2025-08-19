@@ -1,0 +1,191 @@
+import streamlit as st
+import pandas as pd
+import os
+import tempfile
+import re
+from unidecode import unidecode
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+from wordcloud import WordCloud
+
+# ================================
+# Fungsi normalisasi & deteksi keyword
+# ================================
+def normalize_text(text):
+    if not isinstance(text, str):
+        return ""
+    text = unidecode(text)
+    text = re.sub(r'[^\w\s]', '', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.lower()
+
+def detect_judi_keywords(text):
+    keywords = [
+        "deposit", "jp", "jackpot", "gacor", "slot", "wd", "maxwin", "pola",
+        "sensational", "spin", "kredit", "hoki", "777", "hoki777", "sl0t",
+        "sl*t", "withdraw", "buyspin", "freespin", "bo", "bet", "bonus"
+    ]
+    return any(k in text for k in keywords)
+
+# ================================
+# Fungsi visualisasi
+# ================================
+def create_plot_label_distribution(df, label_col):
+    fig, ax = plt.subplots(figsize=(4, 4))
+    sns.countplot(x=label_col, data=df, ax=ax)
+    ax.set_title('Distribusi Label di Dataset')
+    return fig
+
+def create_plot_pred_distribution(y_pred):
+    fig, ax = plt.subplots(figsize=(4, 4))
+    pd.Series(y_pred).value_counts().sort_index().plot(
+        kind='bar',
+        color=['#66b3ff', '#ff9999'],
+        ax=ax
+    )
+    ax.set_title('Distribusi Prediksi Model')
+    ax.set_xlabel('Label')
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(['Bukan Judi', 'Judi'])
+    return fig
+
+def create_pie_chart(total_judi, total):
+    fig, ax = plt.subplots(figsize=(4, 4))
+    if total > 0:
+        ax.pie(
+            [total_judi, total - total_judi],
+            labels=['Judi', 'Bukan Judi'],
+            autopct='%1.1f%%',
+            colors=['#ff9999', '#66b3ff']
+        )
+    ax.set_title('Persentase Deteksi di Data Uji')
+    return fig
+
+def create_wordcloud(text_list):
+    text = ' '.join(text_list)
+    wc = WordCloud(width=400, height=400, background_color='white').generate(text)
+    fig, ax = plt.subplots(figsize=(4, 4))
+    ax.imshow(wc, interpolation='bilinear')
+    ax.axis('off')
+    ax.set_title('Word Cloud Komentar Label=1')
+    return fig
+
+def create_confusion_matrix_plot(y_test, y_pred):
+    fig, ax = plt.subplots(figsize=(4, 4))
+    cm = confusion_matrix(y_test, y_pred)
+    sns.heatmap(
+        cm, annot=True, fmt="d", cmap="YlGnBu",
+        xticklabels=['Bukan Judi', 'Judi'],
+        yticklabels=['Bukan Judi', 'Judi'],
+        ax=ax
+    )
+    ax.set_title("Confusion Matrix")
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("Actual")
+    return fig
+
+# ================================
+# Streamlit UI
+# ================================
+st.set_page_config(page_title="Deteksi Komentar Judi Online", layout="wide")
+st.title("💬 Deteksi Komentar Judi Online + Visualisasi")
+
+uploaded_file = st.file_uploader("Upload dataset (.xlsx / .csv) dengan kolom 'simpleText' dan 'label'")
+
+if uploaded_file:
+    # Baca file
+    ext = os.path.splitext(uploaded_file.name)[1].lower()
+    if ext == ".xlsx":
+        df = pd.read_excel(uploaded_file, engine="openpyxl")
+    elif ext == ".csv":
+        df = pd.read_csv(uploaded_file)
+    else:
+        st.error("Format file tidak didukung!")
+        st.stop()
+
+    # Cek kolom
+    comment_col = next((col for col in df.columns if col.lower() == 'simpletext'), None)
+    label_col = next((col for col in df.columns if col.lower() == 'label'), None)
+    if not comment_col or not label_col:
+        st.error("Kolom 'simpleText' atau 'label' tidak ditemukan!")
+        st.stop()
+
+    # Normalisasi data
+    df[label_col] = pd.to_numeric(df[label_col], errors='coerce').fillna(0).astype(int)
+    df["cleaned"] = df[comment_col].astype(str).apply(normalize_text)
+
+    # Split data
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            df["cleaned"], df[label_col], test_size=0.2, random_state=42, stratify=df[label_col]
+        )
+    except ValueError:
+        st.error("Error saat split data: dataset tidak seimbang atau terlalu kecil.")
+        st.stop()
+
+    # TF-IDF + Model
+    vectorizer = TfidfVectorizer()
+    X_train_tfidf = vectorizer.fit_transform(X_train)
+    X_test_tfidf = vectorizer.transform(X_test)
+
+    clf = MultinomialNB()
+    clf.fit(X_train_tfidf, y_train)
+    y_pred = clf.predict(X_test_tfidf)
+
+    # Hasil
+    acc = accuracy_score(y_test, y_pred)
+    akurasi_persen = round(acc * 100, 2)
+    report_text = classification_report(y_test, y_pred, target_names=['Bukan Judi', 'Judi'], zero_division=0)
+
+    # Prediksi final (gabungan model + keyword)
+    df_result = df.loc[X_test.index].copy()
+    df_result["model_predicted"] = y_pred
+    df_result["keyword_predicted"] = df_result["cleaned"].apply(lambda x: 1 if detect_judi_keywords(x) else 0)
+    df_result["prediksi_final"] = df_result.apply(
+        lambda row: 1 if (row["model_predicted"]==1 or row["keyword_predicted"]==1) else 0, axis=1
+    )
+
+    df_judi = df_result[df_result["prediksi_final"]==1]
+    total_judi = len(df_judi)
+
+    # Ringkasan
+    st.subheader("📊 Ringkasan Hasil")
+    st.text(f"""
+- Total data di file: {len(df)}
+- Data uji: {len(X_test)}
+- Akurasi model: {akurasi_persen}%
+- Komentar terdeteksi judi (di data uji): {total_judi}
+    """)
+    st.text(report_text)
+
+    # Tabel hasil
+    st.subheader("💡 Komentar Terindikasi Judi (dari Data Uji)")
+    st.dataframe(df_judi)
+
+    # Download hasil
+    temp_dir = tempfile.mkdtemp()
+    output_file = os.path.join(temp_dir, "hasil_prediksi_judi.xlsx")
+    df_result.to_excel(output_file, index=False)
+    with open(output_file, "rb") as f:
+        st.download_button("📥 Download Hasil Lengkap (Excel)", f, file_name="hasil_prediksi_judi.xlsx")
+
+    # Visualisasi
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.pyplot(create_plot_label_distribution(df, label_col))
+    with col2:
+        st.pyplot(create_plot_pred_distribution(y_pred))
+    with col3:
+        st.pyplot(create_pie_chart(total_judi, len(df_result)))
+
+    col4, col5 = st.columns(2)
+    example_texts = df[df[label_col]==1][comment_col].astype(str).tolist()
+    if example_texts:
+        with col4:
+            st.pyplot(create_wordcloud(example_texts))
+    with col5:
+        st.pyplot(create_confusion_matrix_plot(y_test, y_pred))

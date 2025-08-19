@@ -1,0 +1,227 @@
+!pip install unidecode gradio pandas scikit-learn openpyxl
+import pandas as pd
+import gradio as gr
+import os
+import tempfile
+import re
+from unidecode import unidecode
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+from wordcloud import WordCloud
+
+# ✅ Fungsi normalisasi teks
+def normalize_text(text):
+    if not isinstance(text, str):
+        return ""
+    text = unidecode(text)
+    text = re.sub(r'[^\w\s]', '', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.lower()
+
+# ✅ Fallback: deteksi keyword judi
+def detect_judi_keywords(text):
+    keywords = [
+       "deposit", "jp", "jackpot", "gacor", "slot", "wd",
+        "maxwin", "pola", "sensational", "spin", "kredit",
+        "hoki", "777", "hoki777",
+        "sl0t", "sl*t", "withdraw", "buyspin", "freespin", "bo", "bet", "bonus"
+    ]
+    return any(k in text for k in keywords)
+
+# ✅ Fungsi untuk buat plot & simpan ke file
+def create_plot_label_distribution(df, label_col, temp_dir):
+    plt.figure(figsize=(4,4))
+    sns.countplot(x=label_col, data=df)
+    plt.title('Distribusi Label di Dataset')
+    img_path = os.path.join(temp_dir, "label_dist.png")
+    plt.savefig(img_path)
+    plt.close()
+    return img_path
+
+def create_plot_pred_distribution(y_pred, temp_dir):
+    plt.figure(figsize=(4,4))
+    pd.Series(y_pred).value_counts().sort_index().plot(kind='bar', color=['#66b3ff', '#ff9999'])
+    plt.title('Distribusi Prediksi Model')
+    plt.xlabel('Label')
+    plt.xticks(ticks=[0, 1], labels=['Bukan Judi', 'Judi'], rotation=0)
+    img_path = os.path.join(temp_dir, "pred_dist.png")
+    plt.savefig(img_path)
+    plt.close()
+    return img_path
+
+def create_pie_chart(total_judi, total, temp_dir):
+    plt.figure(figsize=(4,4))
+    if total > 0:
+        plt.pie(
+            [total_judi, total - total_judi],
+            labels=['Judi','Bukan Judi'],
+            autopct='%1.1f%%',
+            colors=['#ff9999','#66b3ff']
+        )
+    plt.title('Persentase Deteksi di Data Uji')
+    img_path = os.path.join(temp_dir, "pie_chart.png")
+    plt.savefig(img_path)
+    plt.close()
+    return img_path
+
+def create_wordcloud(text_list, temp_dir):
+    text = ' '.join(text_list)
+    wc = WordCloud(width=400, height=400, background_color='white').generate(text)
+    img_path = os.path.join(temp_dir, "wordcloud.png")
+    plt.figure(figsize=(4,4))
+    plt.imshow(wc, interpolation='bilinear')
+    plt.axis('off')
+    plt.title('Word Cloud Komentar Label=1')
+    plt.savefig(img_path)
+    plt.close()
+    return img_path
+
+def create_confusion_matrix_plot(y_test, y_pred, temp_dir):
+    plt.figure(figsize=(4, 4))
+    cm = confusion_matrix(y_test, y_pred)
+    sns.heatmap(cm, annot=True, fmt="d", cmap="YlGnBu", xticklabels=['Bukan Judi', 'Judi'], yticklabels=['Bukan Judi', 'Judi'])
+    plt.title("Confusion Matrix")
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    img_path = os.path.join(temp_dir, "confusion_matrix.png")
+    plt.savefig(img_path)
+    plt.close()
+    return img_path
+
+# ✅ Fungsi utama
+def detect_judi_with_label(file):
+    if file is None:
+        return "Silakan upload file terlebih dahulu.", None, None, None, None, None, None, None, None
+
+    temp_dir = tempfile.mkdtemp()
+
+    try:
+        ext = os.path.splitext(file.name)[1].lower()
+        if ext == ".xlsx":
+            df = pd.read_excel(file.name, engine="openpyxl")
+        elif ext == ".csv":
+            df = pd.read_csv(file.name)
+        else:
+            return "Format file tidak didukung!", None, None, None, None, None, None, None, None
+    except Exception as e:
+        return f"Error membaca file: {e}", None, None, None, None, None, None, None, None
+
+    comment_col = next((col for col in df.columns if col.lower() == 'simpletext'), None)
+    label_col = next((col for col in df.columns if col.lower() == 'label'), None)
+    if not comment_col or not label_col:
+        return "Kolom 'simpleText' atau 'label' tidak ditemukan!", None, None, None, None, None, None, None, None
+
+    df[label_col] = pd.to_numeric(df[label_col], errors='coerce').fillna(0).astype(int)
+    img_label_dist = create_plot_label_distribution(df, label_col, temp_dir)
+
+    example_texts = df[df[label_col]==1][comment_col].astype(str).tolist()
+    img_wordcloud = create_wordcloud(example_texts, temp_dir) if example_texts else None
+
+    df["cleaned"] = df[comment_col].astype(str).apply(normalize_text)
+
+    x = df['cleaned']
+    y = df['label']
+    print(f"\nNumber of samples: {len(x)}")
+    print(f"Unique categories: {y.nunique()}")
+    print(f"Category distribution:\n{y.value_counts()}")
+
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            df["cleaned"], df[label_col], test_size=0.2, random_state=42, stratify=df[label_col]
+        )
+    except ValueError:
+        return "Error saat split data: Kemungkinan ada kelas yang jumlahnya kurang dari 2. Coba dataset yang lebih besar atau seimbang.", None, None, None, None, None, None, None, None
+
+    vectorizer = TfidfVectorizer()
+    X_train_tfidf = vectorizer.fit_transform(X_train)
+    X_test_tfidf = vectorizer.transform(X_test)
+
+    clf = MultinomialNB()
+    clf.fit(X_train_tfidf, y_train)
+    y_pred = clf.predict(X_test_tfidf)
+
+    img_pred_dist = create_plot_pred_distribution(y_pred, temp_dir)
+    img_cm = create_confusion_matrix_plot(y_test, y_pred, temp_dir)
+
+    acc = accuracy_score(y_test, y_pred)
+    akurasi_persen = round(acc * 100, 2)
+    # FIX: Menambahkan zero_division=0 untuk menekan UndefinedMetricWarning
+    report_text = classification_report(y_test, y_pred, target_names=['Bukan Judi', 'Judi'], zero_division=0)
+
+    df_test_idx = X_test.index
+    df_result = df.loc[df_test_idx].copy()
+    df_result["model_predicted"] = y_pred
+
+    df_result["keyword_predicted"] = df_result["cleaned"].apply(lambda x: 1 if detect_judi_keywords(x) else 0)
+    df_result["prediksi_final"] = df_result.apply(
+        lambda row: 1 if (row["model_predicted"]==1 or row["keyword_predicted"]==1) else 0, axis=1
+    )
+
+    df_judi = df_result[df_result["prediksi_final"]==1]
+    total = len(df)
+    total_judi = len(df_judi)
+
+    # FIX: Menambahkan argumen temp_dir yang hilang
+    img_pie = create_pie_chart(total_judi, len(df_result), temp_dir)
+
+    print("CLASSIFICATION REPORT (PADA DATA UJI)")
+    print(report_text)
+
+    summary = f"""RINGKASAN
+- Total data di file: {total}
+- Data uji: {len(X_test)}
+- Akurasi model (pada data uji): {akurasi_persen}%
+- Komentar terdeteksi judi (di data uji): {total_judi}
+"""
+
+    name_col = next((col for col in df.columns if col.lower()=='author'), None)
+    if name_col:
+        names = df_judi[name_col].dropna().unique().tolist()
+        name_output = "\n".join(names) if names else "Tidak ada nama pengguna terdeteksi"
+        df_display = df_judi[[name_col, comment_col, 'model_predicted']]
+    else:
+        name_output = "Kolom 'author' tidak ditemukan"
+        df_display = df_judi[[comment_col, 'model_predicted']]
+
+    output_file = os.path.join(temp_dir, "hasil_prediksi_judi.xlsx")
+    df_result.to_excel(output_file, index=False)
+
+    return summary, df_display, name_output, output_file, img_label_dist, img_pred_dist, img_wordcloud, img_pie, img_cm
+
+# ✅ Gradio UI
+with gr.Blocks(title="Deteksi Komentar Judi Online (Visual)") as demo:
+    gr.Markdown("## 💬 Deteksi Komentar Judi Online + Visualisasi")
+    file_input = gr.File(label="Upload dataset (.xlsx / .csv) dengan kolom 'simpleText' dan 'label'")
+
+    with gr.Row():
+        summary_box = gr.Textbox(label="Ringkasan & Laporan Klasifikasi", lines=17)
+        nama_box = gr.Textbox(label="Nama pengguna terdeteksi", lines=17)
+
+    data_table = gr.Dataframe(label="Komentar Terindikasi Judi (dari Data Uji)", interactive=False)
+    file_download = gr.File(label="Download Hasil Lengkap (Excel)")
+
+    with gr.Row():
+        img_label = gr.Image(label="Distribusi Label di Dataset")
+        img_pred = gr.Image(label="Distribusi Prediksi Model")
+
+    with gr.Row():
+        img_wc = gr.Image(label="Word Cloud Komentar Label=1")
+        img_pie = gr.Image(label="Persentase Deteksi di Data Uji")
+
+    img_confusion_matrix = gr.Image(label="Confusion Matrix")
+
+    file_input.change(
+        fn=detect_judi_with_label,
+        inputs=file_input,
+        outputs=[
+            summary_box, data_table, nama_box, file_download,
+            img_label, img_pred, img_wc, img_pie,
+            img_confusion_matrix
+        ]
+    )
+
+demo.launch(debug=True, share=True)
